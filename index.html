@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>SHEBY.ID</title>
+    <link rel="shortcut icon" href="BSSN-NEW-LOGO.png">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <link rel="manifest" href="manifest.webmanifest">
+    <script src="TemplateData/ConvaiWebGLSDK.js"></script>
+  </head>
+  <body>
+    <div id="unity-container">
+      <canvas id="unity-canvas" width="1920" height="1080" tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"> </div>
+    </div>
+
+    <!-- HIDDEN MOBILE INPUT PROXY: off-screen but focusable (no display:none) -->
+    <input id="mobile-textfield-proxy"
+           type="text"
+           autocomplete="off"
+           autocorrect="off"
+           autocapitalize="off"
+           spellcheck="false"
+           style="position: absolute; top: -1000px; left: 0; width: 1px; height: 1px; opacity: 0.01; pointer-events: auto; z-index: 9999;" />
+
+    <script>
+      // -----------------------------
+      // FocusMobileKeyboard
+      // Called from Unity (.jslib via DllImport) or directly from JS.
+      // Moves proxy briefly into viewport, focuses it, dispatches click, then hides it.
+      // -----------------------------
+      function FocusMobileKeyboard() {
+        try {
+          console.log("[FocusMobileKeyboard] called");
+          var el = document.getElementById("mobile-textfield-proxy");
+          if (!el) {
+            console.warn("[FocusMobileKeyboard] proxy not found, creating one.");
+            el = document.createElement("input");
+            el.id = "mobile-textfield-proxy";
+            el.type = "text";
+            document.body.appendChild(el);
+          }
+
+          // move briefly into view so mobile browsers allow focus
+          el.style.top = "10px";
+          el.style.left = "10px";
+          el.style.opacity = "1";
+          el.style.pointerEvents = "auto";
+
+          // Slight delay to ensure this is processed after user gesture
+          setTimeout(function () {
+            try {
+              el.focus();
+              // synthetic click for extra compatibility
+              var ev = new Event('click', { bubbles: true, cancelable: true });
+              el.dispatchEvent(ev);
+              console.log("[FocusMobileKeyboard] focus & click dispatched");
+            } catch (e) {
+              console.warn("[FocusMobileKeyboard] focus/click error:", e);
+            }
+          }, 50);
+
+          // hide again; keyboard should remain open
+          setTimeout(function () {
+            try {
+              el.style.top = "-1000px";
+              el.style.left = "0";
+              el.style.opacity = "0.01";
+              el.style.pointerEvents = "none";
+              console.log("[FocusMobileKeyboard] proxy hidden again");
+            } catch (e) { /* ignore */ }
+          }, 700);
+        } catch (err) {
+          console.warn("[FocusMobileKeyboard] exception:", err);
+        }
+      }
+
+      // -----------------------------
+      // RegisterMobileKeyboardReceiver
+      // Unity will call this (via .jslib DllImport) with:
+      //   receiverName = gameObject.name
+      //   setMethodName = "SetTextFromProxy"
+      //   submitMethodName = "ProxySubmitFromJS"
+      // JS will then forward input events to the registered receiver.
+      // -----------------------------
+      function RegisterMobileKeyboardReceiver(receiverName, setMethodName, submitMethodName) {
+        try {
+          console.log("[RegisterMobileKeyboardReceiver]", receiverName, setMethodName, submitMethodName);
+          window._mobileKeyboardReceiver = {
+            receiver: receiverName,
+            setMethod: setMethodName,
+            submitMethod: submitMethodName
+          };
+
+          var el = document.getElementById("mobile-textfield-proxy");
+          if (!el) {
+            el = document.createElement("input");
+            el.id = "mobile-textfield-proxy";
+            el.type = "text";
+            document.body.appendChild(el);
+          }
+
+          // Remove existing handlers to avoid duplicates
+          el.oninput = null;
+          el.onkeydown = null;
+
+          // oninput -> send current value to Unity
+          el.oninput = function () {
+            try {
+              var val = el.value;
+              if (window.unityInstance && window._mobileKeyboardReceiver) {
+                window.unityInstance.SendMessage(window._mobileKeyboardReceiver.receiver,
+                                                 window._mobileKeyboardReceiver.setMethod,
+                                                 val);
+              }
+            } catch (e) {
+              console.warn("[RegisterMobileKeyboardReceiver] oninput SendMessage error:", e);
+            }
+          };
+
+          // onkeydown -> submit on Enter
+          el.onkeydown = function (e) {
+            if (e.key === "Enter" || e.keyCode === 13) {
+              try {
+                var val = el.value;
+                if (window.unityInstance && window._mobileKeyboardReceiver) {
+                  window.unityInstance.SendMessage(window._mobileKeyboardReceiver.receiver,
+                                                   window._mobileKeyboardReceiver.submitMethod,
+                                                   val);
+                }
+                // prevent default to avoid form submits
+                e.preventDefault();
+              } catch (err) {
+                console.warn("[RegisterMobileKeyboardReceiver] onkeydown SendMessage error:", err);
+              }
+            }
+          };
+
+          console.log("[RegisterMobileKeyboardReceiver] handlers attached");
+        } catch (ex) {
+          console.warn("[RegisterMobileKeyboardReceiver] exception:", ex);
+        }
+      }
+
+      // Convenience: allow direct JS setting of proxy text if needed
+      function SetProxyValue(v) {
+        var el = document.getElementById("mobile-textfield-proxy");
+        if (el) el.value = v;
+      }
+
+      // -----------------------------
+      // Unity loader + instance storage
+      // -----------------------------
+      window.addEventListener("load", function () {
+        if ("serviceWorker" in navigator) {
+          try { navigator.serviceWorker.register("ServiceWorker.js"); } catch(e) { console.warn("SW register failed", e); }
+        }
+      });
+
+      var container = document.querySelector("#unity-container");
+      var canvas = document.querySelector("#unity-canvas");
+      var loadingBar = document.querySelector("#unity-loading-bar");
+      var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var warningBanner = document.querySelector("#unity-warning");
+
+      function unityShowBanner(msg, type) {
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+        }
+        var div = document.createElement('div');
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type == 'error') div.style = 'background: red; padding: 10px;';
+        else {
+          if (type == 'warning') div.style = 'background: yellow; padding: 10px;';
+          setTimeout(function() {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/_sheby.loader.js";
+      var config = {
+        dataUrl: buildUrl + "/_sheby.data",
+        frameworkUrl: buildUrl + "/_sheby.framework.js",
+        codeUrl: buildUrl + "/_sheby.wasm",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "BSSN",
+        productName: "SHEBY.ID",
+        productVersion: "0.1",
+        showBanner: unityShowBanner,
+      };
+
+      if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+        var meta = document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+        document.getElementsByTagName('head')[0].appendChild(meta);
+      }
+
+      loadingBar.style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        createUnityInstance(canvas, config, (progress) => {
+          progressBarFull.style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          // keep global reference for SendMessage calls from here
+          window.unityInstance = unityInstance;
+          console.log("[index.html] unityInstance ready");
+          loadingBar.style.display = "none";
+        }).catch((message) => {
+          alert(message);
+        });
+      };
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>
